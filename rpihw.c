@@ -46,8 +46,29 @@
 #define VIDEOCORE_BASE_RPI                       0x40000000
 #define VIDEOCORE_BASE_RPI2                      0xc0000000
 
+#define RPI_SCHEME_SHIFT                         23
+#define RPI_SCHEME_MASK                          (0x1 << 23)
+#define RPI_CPU_SHIFT                            12
+#define RPI_CPU_MASK                             (0xf << 12)
+
 #define RPI_MANUFACTURER_MASK                    (0xf << 16)
 #define RPI_WARRANTY_MASK                        (0x3 << 24)
+
+static const rpi_hw_t rpi_hw_bcm2835 = {
+        .hwver  = 0x00,
+        .type = RPI_HWVER_TYPE_PI1,
+        .periph_base = PERIPH_BASE_RPI,
+        .videocore_base = VIDEOCORE_BASE_RPI,
+        .desc = "Default bcm2835",
+	};
+
+static const rpi_hw_t rpi_hw_bcm2836 = {
+        .hwver  = 0x00,
+        .type = RPI_HWVER_TYPE_PI2,
+        .periph_base = PERIPH_BASE_RPI2,
+        .videocore_base = VIDEOCORE_BASE_RPI2,
+        .desc = "Default bcm2836/7",
+	};
 
 static const rpi_hw_t rpi_hw_info[] = {
     //
@@ -303,7 +324,8 @@ static const rpi_hw_t rpi_hw_info[] = {
 
 const rpi_hw_t *rpi_hw_detect(void)
 {
-    FILE *f = fopen("/proc/cpuinfo", "r");
+//    FILE *f = fopen("/proc/cpuinfo", "r");
+    FILE *f = fopen("/tmp/cpuinfo", "r");
     char line[LINE_WIDTH_MAX];
     const rpi_hw_t *result = NULL;
 
@@ -317,6 +339,8 @@ const rpi_hw_t *rpi_hw_detect(void)
         if (strstr(line, HW_VER_STRING))
         {
             uint32_t rev;
+            uint8_t rpi_cpu;
+
             char *substr;
             unsigned i;
 
@@ -332,6 +356,7 @@ const rpi_hw_t *rpi_hw_detect(void)
             {
                 continue;
             }
+            rpi_cpu = (rev & RPI_CPU_MASK) >> RPI_CPU_SHIFT;
 
             for (i = 0; i < (sizeof(rpi_hw_info) / sizeof(rpi_hw_info[0])); i++)
             {
@@ -348,12 +373,36 @@ const rpi_hw_t *rpi_hw_detect(void)
                     goto done;
                 }
             }
+
+
+	// none of the fixed models were matched, use the logic from :
+	// https://gist.github.com/petarov/61bc90a8b0d27c8f7e846ff81871dfa7
+printf ("not in list\n");
+	    if (rev & RPI_SCHEME_MASK)
+	    {
+printf ("new format\n");
+		if ( (rpi_cpu == 1) || (rpi_cpu == 2) )
+		{
+printf ("bcm2836\n");
+		    result = &rpi_hw_bcm2836;
+                    goto done;
+		}
+		if (rpi_cpu == 0)
+		{
+printf ("bcm2835\n");
+		    result = &rpi_hw_bcm2835;
+                    goto done;
+		}
+	    }
         }
     }
+
 
 done:
     fclose(f);
 
+if (result) printf ("found board %s periph base 0x%x\n", result->desc, result->periph_base);
+//exit (-42);
     return result;
 }
 
