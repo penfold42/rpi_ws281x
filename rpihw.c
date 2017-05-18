@@ -54,7 +54,7 @@
 #define RPI_MANUFACTURER_MASK                    (0xf << 16)
 #define RPI_WARRANTY_MASK                        (0x3 << 24)
 
-static const rpi_hw_t rpi_hw_bcm2835 = {
+static rpi_hw_t rpi_hw_bcm2835 = {
         .hwver  = 0x00,
         .type = RPI_HWVER_TYPE_PI1,
         .periph_base = PERIPH_BASE_RPI,
@@ -62,7 +62,7 @@ static const rpi_hw_t rpi_hw_bcm2835 = {
         .desc = "Default bcm2835",
 	};
 
-static const rpi_hw_t rpi_hw_bcm2836 = {
+static rpi_hw_t rpi_hw_bcm2836 = {
         .hwver  = 0x00,
         .type = RPI_HWVER_TYPE_PI2,
         .periph_base = PERIPH_BASE_RPI2,
@@ -324,8 +324,8 @@ static const rpi_hw_t rpi_hw_info[] = {
 
 const rpi_hw_t *rpi_hw_detect(void)
 {
-//    FILE *f = fopen("/proc/cpuinfo", "r");
-    FILE *f = fopen("/tmp/cpuinfo", "r");
+    FILE *f = fopen("/proc/cpuinfo", "r");
+//    FILE *f = fopen("/tmp/cpuinfo", "r");
     char line[LINE_WIDTH_MAX];
     const rpi_hw_t *result = NULL;
 
@@ -339,6 +339,7 @@ const rpi_hw_t *rpi_hw_detect(void)
         if (strstr(line, HW_VER_STRING))
         {
             uint32_t rev;
+            uint32_t rpi_rev;
             uint8_t rpi_cpu;
 
             char *substr;
@@ -351,12 +352,12 @@ const rpi_hw_t *rpi_hw_detect(void)
             }
 
             errno = 0;
-            rev = strtoul(&substr[1], NULL, 16);  // Base 16
+            rpi_rev = strtoul(&substr[1], NULL, 16);  // Base 16
             if (errno)
             {
                 continue;
             }
-            rpi_cpu = (rev & RPI_CPU_MASK) >> RPI_CPU_SHIFT;
+            rpi_cpu = (rpi_rev & RPI_CPU_MASK) >> RPI_CPU_SHIFT;
 
             for (i = 0; i < (sizeof(rpi_hw_info) / sizeof(rpi_hw_info[0])); i++)
             {
@@ -364,7 +365,7 @@ const rpi_hw_t *rpi_hw_detect(void)
 
                 // Take out warranty and manufacturer bits
                 hwver &= ~(RPI_WARRANTY_MASK | RPI_MANUFACTURER_MASK);
-                rev &= ~(RPI_WARRANTY_MASK | RPI_MANUFACTURER_MASK);
+                rev = rpi_rev & ~(RPI_WARRANTY_MASK | RPI_MANUFACTURER_MASK);
                 
                 if (rev == hwver)
                 {
@@ -377,22 +378,26 @@ const rpi_hw_t *rpi_hw_detect(void)
 
 	// none of the fixed models were matched, use the logic from :
 	// https://gist.github.com/petarov/61bc90a8b0d27c8f7e846ff81871dfa7
-printf ("not in list\n");
-	    if (rev & RPI_SCHEME_MASK)
+	    if (rpi_rev & RPI_SCHEME_MASK)
 	    {
-printf ("new format\n");
 		if ( (rpi_cpu == 1) || (rpi_cpu == 2) )
 		{
-printf ("bcm2836\n");
+		    rpi_hw_bcm2836.hwver = rpi_rev;
 		    result = &rpi_hw_bcm2836;
                     goto done;
 		}
 		if (rpi_cpu == 0)
 		{
-printf ("bcm2835\n");
+		    rpi_hw_bcm2835.hwver = rpi_rev;
 		    result = &rpi_hw_bcm2835;
                     goto done;
 		}
+	    }
+	    else if (rpi_rev <= 0x15)
+	    {
+		    rpi_hw_bcm2835.hwver = rpi_rev;
+		    result = &rpi_hw_bcm2835;
+                    goto done;
 	    }
         }
     }
@@ -401,8 +406,7 @@ printf ("bcm2835\n");
 done:
     fclose(f);
 
-if (result) printf ("found board %s periph base 0x%x\n", result->desc, result->periph_base);
-//exit (-42);
+//if (result) printf ("matched board %s, revision %x, periph base 0x%x\n", result->desc, result->hwver, result->periph_base);
     return result;
 }
 
