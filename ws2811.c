@@ -33,7 +33,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -41,6 +40,7 @@
 #include <signal.h>
 #include <linux/types.h>
 #include <linux/spi/spidev.h>
+#include <time.h>
 
 #include "mailbox.h"
 #include "clk.h"
@@ -62,6 +62,9 @@
 #define LED_RESET_uS                             55
 #define LED_BIT_COUNT(leds, freq)                ((leds * LED_COLOURS * 8 * 3) + ((LED_RESET_uS * \
                                                   (freq * 3)) / 1000000))
+
+/* Minimum time to wait for reset to occur in microseconds. */
+#define LED_RESET_WAIT_TIME                      300
 
 // Pad out to the nearest uint32 + 32-bits for idle low/high times the number of channels
 #define PWM_BYTE_COUNT(leds, freq)               (((((LED_BIT_COUNT(leds, freq) >> 3) & ~0x7) + 4) + 4) * \
@@ -112,6 +115,22 @@ typedef struct ws2811_device
 } ws2811_device_t;
 
 /**
+ * Provides monotonic timestamp in microseconds.
+ *
+ * @returns  Current timestamp in microseconds or 0 on error.
+ */
+static uint64_t get_microsecond_timestamp()
+{
+    struct timespec t;
+
+    if (clock_gettime(CLOCK_MONOTONIC_RAW, &t) != 0) {
+        return 0;
+    }
+
+    return (uint64_t) t.tv_sec * 1000000 + t.tv_nsec / 1000;
+}
+
+/**
  * Iterate through the channels and find the largest led count.
  *
  * @param    ws2811  ws2811 instance pointer.
@@ -156,7 +175,7 @@ static int map_registers(ws2811_t *ws2811)
     }
     dma_addr += rpi_hw->periph_base;
 
-    device->dma = mapmem(dma_addr, sizeof(dma_t));
+    device->dma = mapmem(dma_addr, sizeof(dma_t), DEV_MEM);
     if (!device->dma)
     {
         return -1;
@@ -164,7 +183,7 @@ static int map_registers(ws2811_t *ws2811)
 
     switch (device->driver_mode) {
     case PWM:
-        device->pwm = mapmem(PWM_OFFSET + base, sizeof(pwm_t));
+        device->pwm = mapmem(PWM_OFFSET + base, sizeof(pwm_t), DEV_MEM);
         if (!device->pwm)
         {
             return -1;
@@ -172,7 +191,7 @@ static int map_registers(ws2811_t *ws2811)
         break;
 
     case PCM:
-        device->pcm = mapmem(PCM_OFFSET + base, sizeof(pcm_t));
+        device->pcm = mapmem(PCM_OFFSET + base, sizeof(pcm_t), DEV_MEM);
         if (!device->pcm)
         {
             return -1;
@@ -180,7 +199,12 @@ static int map_registers(ws2811_t *ws2811)
         break;
     }
 
-    device->gpio = mapmem(GPIO_OFFSET + base, sizeof(gpio_t));
+    /*
+     * The below call can potentially work with /dev/gpiomem instead.
+     * However, it used /dev/mem before, so I'm leaving it as such.
+     */
+
+    device->gpio = mapmem(GPIO_OFFSET + base, sizeof(gpio_t), DEV_MEM);
     if (!device->gpio)
     {
         return -1;
@@ -194,7 +218,7 @@ static int map_registers(ws2811_t *ws2811)
         offset = CM_PCM_OFFSET;
         break;
     }
-    device->cm_clk = mapmem(offset + base, sizeof(cm_clk_t));
+    device->cm_clk = mapmem(offset + base, sizeof(cm_clk_t), DEV_MEM);
     if (!device->cm_clk)
     {
         return -1;
@@ -590,6 +614,11 @@ void ws2811_cleanup(ws2811_t *ws2811)
             free(ws2811->channel[chan].leds);
         }
         ws2811->channel[chan].leds = NULL;
+        if (ws2811->channel && ws2811->channel[chan].gamma)
+        {
+            free(ws2811->channel[chan].gamma);
+        }
+        ws2811->channel[chan].gamma = NULL;
     }
 
     if (device->mbox.handle != -1)
@@ -625,7 +654,7 @@ static int set_driver_mode(ws2811_t *ws2811, int gpionum)
         gpionum2 = ws2811->channel[1].gpionum;
         if (gpionum2 == 0 || gpionum2 == 13 || gpionum2 == 19) {
             return 0;
-        } 
+        }
     }
     else if (gpionum == 21 || gpionum == 31) {
         ws2811->device->driver_mode = PCM;
@@ -657,7 +686,7 @@ static int check_hwver_and_gpionum(ws2811_t *ws2811)
     gpionum = ws2811->channel[0].gpionum;
     if (hwver < 0x0004)  // Model B Rev 1
     {
-        for ( i = 0; i < (sizeof(gpionums_B1) / sizeof(gpionums_B1[0])); i++)
+        for ( i = 0; i < (int)(sizeof(gpionums_B1) / sizeof(gpionums_B1[0])); i++)
         {
             if (gpionums_B1[i] == gpionum) {
                 // Set driver mode (PWM, PCM, or SPI)
@@ -665,9 +694,9 @@ static int check_hwver_and_gpionum(ws2811_t *ws2811)
             }
         }
     }
-    else if (hwver >= 0x000e && hwver <= 0x000f)  // Models B Rev2, A
+    else if (hwver >= 0x0004 && hwver <= 0x000f)  // Models B Rev2, A
     {
-        for ( i = 0; i < (sizeof(gpionums_B2) / sizeof(gpionums_B2[0])); i++)
+        for ( i = 0; i < (int)(sizeof(gpionums_B2) / sizeof(gpionums_B2[0])); i++)
         {
             if (gpionums_B2[i] == gpionum) {
                 // Set driver mode (PWM, PCM, or SPI)
@@ -675,7 +704,7 @@ static int check_hwver_and_gpionum(ws2811_t *ws2811)
             }
         }
     }
-    else if (hwver >= 0x010) // Models B+, A+, 2B, 3B
+    else if (hwver >= 0x010) // Models B+, A+, 2B, 3B, Zero Zero-W
     {
         if ((ws2811->channel[0].count == 0) && (ws2811->channel[1].count > 0))
         {
@@ -691,7 +720,7 @@ static int check_hwver_and_gpionum(ws2811_t *ws2811)
                 return -1;
             }
         }
-        for ( i = 0; i < (sizeof(gpionums_40p) / sizeof(gpionums_40p[0])); i++)
+        for ( i = 0; i < (int)(sizeof(gpionums_40p) / sizeof(gpionums_40p[0])); i++)
         {
             if (gpionums_40p[i] == gpionum) {
                 // Set driver mode (PWM, PCM, or SPI)
@@ -710,6 +739,8 @@ static ws2811_return_t spi_init(ws2811_t *ws2811)
     static uint8_t bits = 8;
     uint32_t speed = ws2811->freq * 3;
     ws2811_device_t *device = ws2811->device;
+    uint32_t base = ws2811->rpi_hw->periph_base;
+    int pinnum = ws2811->channel[0].gpionum;
 
     spi_fd = open("/dev/spidev0.0", O_RDWR);
     if (spi_fd < 0) {
@@ -756,9 +787,16 @@ static ws2811_return_t spi_init(ws2811_t *ws2811)
     device->pcm = NULL;
     device->dma_cb = NULL;
     device->dma_cb_addr = 0;
-    device->gpio = NULL;
     device->cm_clk = NULL;
     device->mbox.handle = -1;
+
+    // Set SPI-MOSI pin
+    device->gpio = mapmem(GPIO_OFFSET + base, sizeof(gpio_t), DEV_GPIOMEM);
+    if (!device->gpio)
+    {
+        return WS2811_ERROR_SPI_SETUP;
+    }
+    gpio_function_set(device->gpio, pinnum, 0);	// SPI-MOSI ALT0
 
     // Allocate LED buffer
     ws2811_channel_t *channel = &ws2811->channel[0];
@@ -766,12 +804,22 @@ static ws2811_return_t spi_init(ws2811_t *ws2811)
     if (!channel->leds)
     {
         ws2811_cleanup(ws2811);
-	return WS2811_ERROR_OUT_OF_MEMORY;
+        return WS2811_ERROR_OUT_OF_MEMORY;
     }
     memset(channel->leds, 0, sizeof(ws2811_led_t) * channel->count);
     if (!channel->strip_type)
     {
       channel->strip_type=WS2811_STRIP_RGB;
+    }
+
+    // Set default uncorrected gamma table
+    if (!channel->gamma)
+    {
+      channel->gamma = malloc(sizeof(uint8_t) * 256);
+      int x;
+      for(x = 0; x < 256; x++){
+        channel->gamma[x] = x;
+      }
     }
 
     channel->wshift = (channel->strip_type >> 24) & 0xff;
@@ -805,11 +853,11 @@ static ws2811_return_t spi_transfer(ws2811_t *ws2811)
     if (ret < 1)
     {
         fprintf(stderr, "Can't send spi message");
-	return WS2811_ERROR_SPI_TRANSFER;
+        return WS2811_ERROR_SPI_TRANSFER;
     }
 
     return WS2811_SUCCESS;
-}    
+}
 
 
 /*
@@ -892,7 +940,7 @@ ws2811_return_t ws2811_init(ws2811_t *ws2811)
        return WS2811_ERROR_MEM_LOCK;
     }
 
-    device->mbox.virt_addr = mapmem(BUS_TO_PHYS(device->mbox.bus_addr), device->mbox.size);
+    device->mbox.virt_addr = mapmem(BUS_TO_PHYS(device->mbox.bus_addr), device->mbox.size, DEV_MEM);
     if (!device->mbox.virt_addr)
     {
         mem_unlock(device->mbox.handle, device->mbox.mem_ref);
@@ -919,7 +967,7 @@ ws2811_return_t ws2811_init(ws2811_t *ws2811)
         if (!channel->leds)
         {
             ws2811_cleanup(ws2811);
-	    return WS2811_ERROR_OUT_OF_MEMORY;
+            return WS2811_ERROR_OUT_OF_MEMORY;
         }
 
         memset(channel->leds, 0, sizeof(ws2811_led_t) * channel->count);
@@ -927,6 +975,16 @@ ws2811_return_t ws2811_init(ws2811_t *ws2811)
         if (!channel->strip_type)
         {
           channel->strip_type=WS2811_STRIP_RGB;
+        }
+
+        // Set default uncorrected gamma table
+        if (!channel->gamma)
+        {
+          channel->gamma = malloc(sizeof(uint8_t) * 256);
+          int x;
+          for(x = 0; x < 256; x++){
+            channel->gamma[x] = x;
+          }
         }
 
         channel->wshift = (channel->strip_type >> 24) & 0xff;
@@ -1067,33 +1125,44 @@ ws2811_return_t  ws2811_render(ws2811_t *ws2811)
     int i, k, l, chan;
     unsigned j;
     ws2811_return_t ret = WS2811_SUCCESS;
+    uint32_t protocol_time = 0;
+    static uint64_t previous_timestamp = 0;
 
     bitpos = (driver_mode == SPI ? 7 : 31);
 
     for (chan = 0; chan < RPI_PWM_CHANNELS; chan++)         // Channel
     {
         ws2811_channel_t *channel = &ws2811->channel[chan];
+
         int wordpos = chan; // PWM & PCM
         int bytepos = 0;    // SPI
-        const int scale   = (channel->brightness & 0xff) + 1;
+        const int scale = (channel->brightness & 0xff) + 1;
+        uint8_t array_size = 3; // Assume 3 color LEDs, RGB
+
+        // If our shift mask includes the highest nibble, then we have 4 LEDs, RBGW.
+        if (channel->strip_type & SK6812_SHIFT_WMASK)
+        {
+            array_size = 4;
+        }
+
+        // 1.25µs per bit
+        const uint32_t channel_protocol_time = channel->count * array_size * 8 * 1.25;
+
+        // Only using the channel which takes the longest as both run in parallel
+        if (channel_protocol_time > protocol_time)
+        {
+            protocol_time = channel_protocol_time;
+        }
 
         for (i = 0; i < channel->count; i++)                // Led
         {
             uint8_t color[] =
             {
-                (((channel->leds[i] >> channel->rshift) & 0xff) * scale) >> 8, // red
-                (((channel->leds[i] >> channel->gshift) & 0xff) * scale) >> 8, // green
-                (((channel->leds[i] >> channel->bshift) & 0xff) * scale) >> 8, // blue
-                (((channel->leds[i] >> channel->wshift) & 0xff) * scale) >> 8, // white
+                channel->gamma[(((channel->leds[i] >> channel->rshift) & 0xff) * scale) >> 8], // red
+                channel->gamma[(((channel->leds[i] >> channel->gshift) & 0xff) * scale) >> 8], // green
+                channel->gamma[(((channel->leds[i] >> channel->bshift) & 0xff) * scale) >> 8], // blue
+                channel->gamma[(((channel->leds[i] >> channel->wshift) & 0xff) * scale) >> 8], // white
             };
-            uint8_t array_size = 3; // Assume 3 color LEDs, RGB
-
-            // If our shift mask includes the highest nibble, then we have 4
-            // LEDs, RBGW.
-            if (channel->strip_type & SK6812_SHIFT_WMASK)
-            {
-                array_size = 4;
-            }
 
             for (j = 0; j < array_size; j++)               // Color
             {
@@ -1121,9 +1190,9 @@ ws2811_return_t  ws2811_render(ws2811_t *ws2811)
                             {
                                 *byteptr |= (1 << bitpos);
                             }
-			}
-			else  // PWM & PCM
-			{
+                        }
+                        else  // PWM & PCM
+                        {
                             *wordptr &= ~(1 << bitpos);
                             if (symbol & (1 << l))
                             {
@@ -1158,14 +1227,27 @@ ws2811_return_t  ws2811_render(ws2811_t *ws2811)
         return ret;
     }
 
+    if (ws2811->render_wait_time != 0) {
+        const uint64_t current_timestamp = get_microsecond_timestamp();
+        uint64_t time_diff = current_timestamp - previous_timestamp;
+
+        if (ws2811->render_wait_time > time_diff) {
+            usleep(ws2811->render_wait_time - time_diff);
+        }
+    }
+
     if (driver_mode != SPI)
     {
         dma_start(ws2811);
     }
-    else if ((ret = spi_transfer(ws2811)) != WS2811_SUCCESS)
+    else
     {
-        return ret;
+        ret = spi_transfer(ws2811);
     }
+
+    // LED_RESET_WAIT_TIME is added to allow enough time for the reset to occur.
+    previous_timestamp = get_microsecond_timestamp();
+    ws2811->render_wait_time = protocol_time + LED_RESET_WAIT_TIME;
 
     return ret;
 }
@@ -1175,7 +1257,7 @@ const char * ws2811_get_return_t_str(const ws2811_return_t state)
     const int index = -state;
     static const char * const ret_state_str[] = { WS2811_RETURN_STATES(WS2811_RETURN_STATES_STRING) };
 
-    if (index < sizeof(ret_state_str) / sizeof(ret_state_str[0]))
+    if (index < (int)(sizeof(ret_state_str) / sizeof(ret_state_str[0])))
     {
         return ret_state_str[index];
     }

@@ -78,10 +78,12 @@ typedef struct
     uint8_t rshift;                              //< Red shift value
     uint8_t gshift;                              //< Green shift value
     uint8_t bshift;                              //< Blue shift value
+    uint8_t *gamma;                              //< Gamma correction table
 } ws2811_channel_t;
 
 typedef struct
 {
+    uint64_t render_wait_time;                   //< time in µs before the next render can run
     struct ws2811_device *device;                //< Private data for driver use
     const rpi_hw_t *rpi_hw;                      //< RPI Hardware Information
     uint32_t freq;                               //< Required output frequency
