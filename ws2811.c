@@ -392,7 +392,7 @@ static int setup_pwm(ws2811_t *ws2811)
 
     dma_cb->source_ad = addr_to_bus(device, device->pxl_raw);
 
-    dma_cb->dest_ad = (uint32_t)&((pwm_t *)PWM_PERIPH_PHYS)->fif1;
+    dma_cb->dest_ad = (uintptr_t)&((pwm_t *)PWM_PERIPH_PHYS)->fif1;
     dma_cb->txfr_len = byte_count;
     dma_cb->stride = 0;
     dma_cb->nextconbk = 0;
@@ -457,7 +457,7 @@ static int setup_pcm(ws2811_t *ws2811)
                  RPI_DMA_TI_SRC_INC;          // Increment src addr
 
     dma_cb->source_ad = addr_to_bus(device, device->pxl_raw);
-    dma_cb->dest_ad = (uint32_t)&((pcm_t *)PCM_PERIPH_PHYS)->fifo;
+    dma_cb->dest_ad = (uintptr_t)&((pcm_t *)PCM_PERIPH_PHYS)->fifo;
     dma_cb->txfr_len = byte_count;
     dma_cb->stride = 0;
     dma_cb->nextconbk = 0;
@@ -892,6 +892,7 @@ ws2811_return_t ws2811_init(ws2811_t *ws2811)
     {
         return WS2811_ERROR_OUT_OF_MEMORY;
     }
+    memset(ws2811->device, 0, sizeof(*ws2811->device));
     device = ws2811->device;
 
     if (check_hwver_and_gpionum(ws2811) < 0)
